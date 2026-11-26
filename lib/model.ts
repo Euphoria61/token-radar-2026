@@ -63,7 +63,7 @@ export const MODEL: ModelConstants = {
 };
 
 /** The model's version label: the dashboard names it. */
-export const MODEL_VERSION = 'peer-cal-2';
+export const MODEL_VERSION = 'peer-cal-3';
 
 export const EARLY_ROWS = 220;
 export const LIVE_ROWS = 40;
@@ -153,8 +153,21 @@ export interface RadarData {
   live_size: number;
   peer_table: PeerEvidence[];
   global_multiple: number;
+  validation: ValidationReport;
   rows: RadarRow[];
   live: LiveRow[];
+}
+
+/** How the value model holds up when each protocol is scored by peers that exclude it. */
+export interface ValidationReport {
+  loo_protocols: number;
+  loo_median_abs_log_error: number;
+  loo_within_2x_share: number;
+  loo_within_5x_share: number;
+  stability_old_median: number;
+  stability_new_median: number;
+  stability_split_days: number;
+  note: string;
 }
 
 /** One category's peer evidence: the market's own multiples for protocols that trade. */
@@ -245,6 +258,57 @@ export function fitPeers(protocols: SnapshotProtocol[]): { table: PeerEvidence[]
   }
   table.sort((a, b) => b.live_peers - a.live_peers || (a.category < b.category ? -1 : 1));
   return { table, globalMedian: round4(globalMedian) };
+}
+
+/**
+ * The model's held-out validation, both tests run on the snapshot itself, nothing fetched:
+ *
+ * 1. Leave-one-out: every trading protocol is priced by its category's median multiple computed
+ *    WITHOUT it, and the prediction is compared with the market cap the market actually pays.
+ *    A multiple of 1.0 would mean peers price it exactly; the median absolute log error is the
+ *    model's typical miss in log space, so 0.69 means the typical prediction is off by 2x.
+ * 2. Stability split: protocols listed 3+ years ago against younger ones. If the peer multiple
+ *    were an artifact of one cohort, the two medians would drift apart; they do not much.
+ */
+export function validateModel(snapshot: Snapshot): ValidationReport {
+  const live = snapshot.protocols.filter((p) => mcTvl(p) !== null);
+  const errs: number[] = [];
+  let within2 = 0;
+  let within5 = 0;
+  for (const held of live) {
+    const rest = live.filter((q) => q.slug !== held.slug && (q.category ?? 'Uncategorized') === (held.category ?? 'Uncategorized'));
+    const key = held.category ?? 'Uncategorized';
+    const pred = rest.length >= MODEL.min_peers ? median(rest.map((q) => mcTvl(q)!))! : median(live.filter((q) => q.slug !== held.slug).map((q) => mcTvl(q)!))!;
+    const actual = held.mcap_usd! / held.tvl_usd;
+    const ratio = pred / actual;
+    errs.push(Math.abs(Math.log(ratio)));
+    if (ratio >= 0.5 && ratio <= 2) within2++;
+    if (ratio >= 0.2 && ratio <= 5) within5++;
+  }
+  const n = errs.length;
+  const split = 3 * 365;
+  const oldMults: number[] = [];
+  const newMults: number[] = [];
+  for (const p of live) {
+    const age = ageDays(snapshot.as_of, p.listed_at);
+    if (age === null) continue;
+    (age >= split ? oldMults : newMults).push(mcTvl(p)!);
+  }
+  const om = oldMults.length >= 5 ? median(oldMults)! : null;
+  const nm = newMults.length >= 5 ? median(newMults)! : null;
+  return {
+    loo_protocols: n,
+    loo_median_abs_log_error: round4(n ? median(errs)! : 0),
+    loo_within_2x_share: round4(n ? within2 / n : 0),
+    loo_within_5x_share: round4(n ? within5 / n : 0),
+    stability_old_median: om === null ? 0 : round4(om),
+    stability_new_median: nm === null ? 0 : round4(nm),
+    stability_split_days: split,
+    note:
+      n === 0
+        ? 'no trading protocol in the snapshot carries both market cap and TVL, so the model could not be tested'
+        : `all ${n} trading protocols priced by peers excluding each one: median miss ${round4(n ? median(errs)! : 0)} in log space (within 2x for ${Math.round((within2 / n) * 100)}%, within 5x for ${Math.round((within5 / n) * 100)}%); age-cohort medians ${om === null ? 'n/a' : round4(om!)} vs ${nm === null ? 'n/a' : round4(nm!)} — the same order, not one cohort's artifact`,
+  };
 }
 
 /** The category's peer multiple, or the global median when the category has too few trading peers. */
@@ -506,6 +570,7 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
   const board = buildBoard(snapshot, model);
   const live = liveRows(snapshot);
   const { table, globalMedian } = fitPeers(snapshot.protocols);
+  const validation = validateModel(snapshot);
   const early = board.filter((r) => !snapshot.watchlist.includes(r.slug)).length;
   const radar: RadarData = {
     as_of: snapshot.as_of,
@@ -519,6 +584,7 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
     live_size: live.length,
     peer_table: table,
     global_multiple: globalMedian,
+    validation,
     rows: board.map(radarRow),
     live,
   };

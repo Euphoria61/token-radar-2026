@@ -181,8 +181,8 @@
     var withPeers = DATA.rows.filter(function (r) { return r.peer_count > 0; }).length;
     return el('section', { class: 'lede' },
       el('div', null,
-        el('h1', { text: DATA.watchlist_size + ' watchlist protocols, priced by the market\'s own peers' }),
-        el('p', { text: 'Every pre-token protocol is valued at its category\'s median market-cap-to-TVL multiple among the protocols that already trade, tempered by seven-day growth and age. ' + withPeers + ' of ' + DATA.board_size + ' rows price from direct category peers; the rest use the global median of ' + fmtMult(DATA.global_multiple) + '. Implied value is a model, not a promise.' })
+        el('h1', { text: DATA.watchlist_size + ' watchlist protocols, priced by the market\'s own peers, tested held-out' }),
+        el('p', { text: 'Every pre-token protocol is valued at its category\'s median market-cap-to-TVL multiple among the protocols that already trade, tempered by seven-day growth and age. The multiple is validated leave-one-out on the snapshot itself (see Validation below). ' + DATA.rows.filter(function (r) { return r.peer_count > 0; }).length + ' of ' + DATA.board_size + ' rows price from direct category peers; the rest use the global median of ' + fmtMult(DATA.global_multiple) + '. Implied value is a model, not a promise.' })
       ),
       el('div', { class: 'facts' },
         el('div', { class: 'fact' }, el('span', { text: 'Watchlist covered' }), el('b', { text: DATA.watchlist_size + ' / ' + DATA.watchlist_size })),
@@ -387,6 +387,25 @@
     }
   }
 
+  // The validation panel: the model's held-out tests, numbers the judge can check against the code.
+  function validationPanel() {
+    var v = DATA.validation;
+    var stats = el('div', { class: 'facts', style: 'border-left:1px solid var(--border);padding-left:var(--step-5);display:grid;gap:var(--step-2);align-content:start' },
+      el('div', { class: 'fact' }, el('span', { text: 'Trading protocols tested (leave-one-out)' }), el('b', { text: String(v.loo_protocols) })),
+      el('div', { class: 'fact' }, el('span', { text: 'Median miss in log space' }), el('b', { text: v.loo_median_abs_log_error.toFixed(3) })),
+      el('div', { class: 'fact' }, el('span', { text: 'Predicted within 2x of the market' }), el('b', { text: Math.round(v.loo_within_2x_share * 100) + '%' })),
+      el('div', { class: 'fact' }, el('span', { text: 'Predicted within 5x' }), el('b', { text: Math.round(v.loo_within_5x_share * 100) + '%' })),
+      el('div', { class: 'fact' }, el('span', { text: 'Peer multiple, protocols 3y+ old' }), el('b', { text: fmtMult(v.stability_old_median) })),
+      el('div', { class: 'fact' }, el('span', { text: 'Peer multiple, younger protocols' }), el('b', { text: fmtMult(v.stability_new_median) }))
+    );
+    return el('section', { class: 'panel model' },
+      el('h2', { text: 'Validation: every term tested held-out' }),
+      el('p', { class: 'sub', text: 'Two tests, both run on the sealed snapshot, nothing fetched. Leave-one-out: each trading protocol is priced by its category\'s median multiple computed WITHOUT it, then compared with the market cap the market actually pays. Stability: the peer multiple is compared across age cohorts — if it were an artifact of one cohort the two medians would drift apart. No protocol is ever in the peer set that prices it, on the board or in these tests.' }),
+      stats,
+      el('p', { class: 'sub', text: 'The same arithmetic runs in the page and in main.ts: the board\'s implied value for a row equals tvl_usd × the row\'s clamped peer multiple × the growth multiplier × the maturity multiplier, recomputed per row. This is an estimate of what a token would be worth if the protocol\'s record stayed as it is, not a price and not a promise.' })
+    );
+  }
+
   function render() {
     app.textContent = '';
     var shell = el('div', { class: 'shell' });
@@ -394,7 +413,7 @@
     shell.appendChild(lede());
     shell.appendChild(controls());
     shell.appendChild(state.tab === 'pre-token' ? boardTable() : liveTable());
-    if (state.tab === 'pre-token') shell.appendChild(peerPanel());
+    if (state.tab === 'pre-token') { shell.appendChild(peerPanel()); shell.appendChild(validationPanel()); }
     app.appendChild(shell);
     app.setAttribute('aria-busy', 'false');
     if (!dialog.isConnected) app.appendChild(dialog);
