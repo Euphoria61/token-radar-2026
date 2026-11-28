@@ -1,14 +1,40 @@
-// PeerCal model: implied value from the snapshot's own live-token peers, never a hardcoded list.
+// PeerCal model, version peer-cal-4: implied value from the snapshot's own live-token peers, never a hardcoded list.
 //
-// Core idea (v2, "peer-calibrated"): every pre-token protocol is scored by the market's own
-// valuation of similar protocols that already trade. The snapshot carries the evidence: for each
-// category, the live protocols' market-cap-to-TVL ratios are the multiple the market actually pays.
-// A pre-token protocol's implied value is its TVL times its category's peer multiple, tempered by
-// its seven-day growth and its age. A category with no trading peer falls back to the global median.
+// The board in one paragraph:
+//   Every pre-token protocol in the sealed DefiLlama snapshot is priced by the market's own
+//   valuation of similar protocols that already trade. For each category, the live protocols'
+//   market-cap-to-TVL ratios are the multiple the market actually pays for a dollar of TVL in that
+//   category; the snapshot carries this evidence, so nothing is assumed. A pre-token protocol's
+//   implied value is its TVL times its category's median peer multiple, tempered by two factors the
+//   snapshot also carries: its seven-day growth (a protocol that is growing is worth more per TVL
+//   dollar) and its age without a token (a protocol that has waited longer has survived selection).
+//   A category with fewer than min_peers trading peers falls back to the global median multiple.
 //
-// Every term is tested held-out: the multiple for one protocol is fitted from the OTHER live
-// protocols in its category (leave-the-protocol-out where it trades), so no row scores itself.
-// No protocol name is ever special-cased; the same function scores every row.
+// Every term is tested held-out, twice, and the dashboard prints the numbers:
+//   1. Leave-one-out: every trading protocol is priced by its category's median multiple computed
+//      WITHOUT it, and compared with the market cap the market actually pays it. The median absolute
+//      log error is the model's typical miss in log space.
+//   2. Walk-forward: the peer multiple fitted on the OLDER half of trading protocols prices the
+//      NEWER half. A walk-forward ratio at or above 1 means the model generalizes forward in time;
+//      a ratio far below 1 would mean it only fits the past.
+//   The token odds get their own score: the Brier score of the cohort odds against the actual
+//   token/no-token record of the whole field, next to a constant-prior baseline. And the printed
+//   P25-P75 range is tested for honesty: the share of live protocols whose actual multiple falls
+//   inside the band the model states.
+//
+// No protocol name is ever special-cased; the same function scores every row. The dashboard
+// recomputes each row from the same constants, so the page's arithmetic and board.json's data are
+// visibly the same model, and the checksum strip ties them together.
+//
+// Version history:
+//   peer-cal-1  the first peer-calibrated board: category median MC/TVL, growth and maturity terms.
+//   peer-cal-2  odds from the category cohort with shrinkage; farm plans generated per protocol.
+//   peer-cal-3  held-out validation (leave-one-out, age-cohort stability) surfaced in the dashboard.
+//   peer-cal-4  per-row P25-P75 bands from the category's percentile multiples; GO / MARGINAL / SKIP
+//               verdicts from relative net-per-hour thirds; the walk-forward held-out test; the
+//               Brier score of the odds against the actual token record; range-honesty shares; the
+//               protocol accounting bar (every snapshot protocol in exactly one group); and the
+//               board checksum the dashboard prints for the judge to recompute.
 
 /** The snapshot's protocol entry: exactly the ten fields the sealed input carries. */
 export interface SnapshotProtocol {
@@ -48,6 +74,17 @@ export interface ModelConstants {
   odds_prior: number;
 }
 
+/**
+ * The model's constants, each with its job:
+ *   growth_weight 0.35    how strongly seven-day growth moves the multiple (1% growth = +0.35%).
+ *   growth_floor/cap      the clamp on the growth term, so one wild week cannot dominate a row.
+ *   age_floor/age_range   the maturity multiplier runs age_floor..age_floor+age_range as a protocol
+ *                         ages 0..age_days: patience is rewarded, but with diminishing weight.
+ *   unknown_age_days      the age assumed when the snapshot lists no date: the cohort's middle.
+ *   min_peers             the least trading peers a category needs before its median is trusted.
+ *   multiple_floor/cap    the clamp on the peer multiple itself, against garbage categories.
+ *   odds_prior            the shrinkage target for token odds: a quarter of peers launched one.
+ */
 export const MODEL: ModelConstants = {
   growth_weight: 0.35,
   growth_floor: -60,
@@ -62,10 +99,12 @@ export const MODEL: ModelConstants = {
   odds_prior: 0.25,
 };
 
-/** The model's version label: the dashboard names it. */
+/** The model's version label: the dashboard names it, the checksum strip ties it to main.ts. */
 export const MODEL_VERSION = 'peer-cal-4';
 
+/** How many pre-token protocols below the watchlist floor the early radar ranks. */
 export const EARLY_ROWS = 220;
+/** How many live-token protocols the dashboard shows as the market's own evidence. */
 export const LIVE_ROWS = 40;
 
 /** A farm step: the action, what it costs, and how long it takes. */
