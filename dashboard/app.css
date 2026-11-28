@@ -74,6 +74,9 @@ a { color: var(--accent); }
 .verdict.marginal { background: #fdf3e0; color: #a3690b; }
 .verdict.skip { background: #f6e4e2; color: var(--negative); }
 .tiers { display: flex; gap: var(--step-1); flex-wrap: wrap; }
+.plan { display: flex; align-items: center; gap: var(--step-3); flex-wrap: wrap; padding: var(--step-3) var(--step-4); margin-top: var(--step-3);
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-panel); }
+.plan input[type="range"] { flex: 0 1 260px; accent-color: var(--accent); }
 .tier { padding: 4px 10px; border-radius: var(--radius-control); border: 1px solid var(--border); background: var(--surface); font-size: 12.5px; }
 .tier.on { background: var(--ink); color: var(--canvas); border-color: var(--ink); }
 .evidence-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--step-4); margin-top: var(--step-3); }

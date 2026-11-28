@@ -8,7 +8,7 @@
   var DATA = window.RADAR;
   if (!DATA) return;
   var app = document.getElementById('board');
-  var state = { q: '', category: 'all', tab: 'pre-token', sort: 'implied', dir: -1, selected: null, minOdds: 0, verdict: 'all' };
+  var state = { q: '', category: 'all', tab: 'pre-token', sort: 'implied', dir: -1, selected: null, minOdds: 0, verdict: 'all', planSize: 250, horizonDays: 45 };
 
   function fmtUsd(n) {
     if (n === null || n === undefined || !isFinite(n)) return 'n/a';
@@ -292,6 +292,39 @@
     var a = document.createElement('a'); a.href = url; a.download = 'board.json'; a.click(); URL.revokeObjectURL(url);
   }
 
+  // The plan-size scenario: the reader picks a position size and a horizon and every verdict is
+  // re-costed live. The page, not the model, owns the scenario: the board's verdict stays the
+  // snapshot's default, this slider answers "what if I farm with more/less capital".
+  function planPanel() {
+    var wrap = el('div', { class: 'plan' },
+      el('span', { class: 'sub', text: 'plan size' }),
+      el('input', { type: 'range', id: 'plansize', min: '50', max: '2000', step: '50', value: String(state.planSize), 'aria-label': 'Plan size in dollars' }),
+      el('b', { class: 'num', id: 'plansize-out', text: '$' + state.planSize }),
+      el('span', { class: 'sub', text: 'of capital per position; verdict chips and net/hour re-cost live' })
+    );
+    var input = wrap.querySelector('#plansize');
+    input.addEventListener('input', function () {
+      state.planSize = Number(input.value);
+      wrap.querySelector('#plansize-out').textContent = '$' + state.planSize;
+      render();
+    });
+    return wrap;
+  }
+  // Net per hour under the current scenario: the modelled airdrop over the position's capital-hours.
+  function netPerHour(row) {
+    var capital = Math.max(state.planSize, 1);
+    var hours = state.horizonDays * 24;
+    var drop = row.implied_value_usd * 0.005; // the pool's modelled airdrop share of implied value
+    return (drop * (row.token_odds || 0) * 4) / hours / capital * 1000;
+  }
+
+  // The verdict chip under the current scenario: the board's own verdict at the default plan size,
+  // and relative thirds of the scenario net/hour once the reader moves the slider.
+  function scenarioVerdict(row) {
+    if (state.planSize === 250 && state.horizonDays === 45) return row.verdict;
+    var perHour = netPerHour(row);
+    return perHour >= 1 ? 'go' : perHour > 0 ? 'marginal' : 'skip';
+  }
   function sortHeader(key, label) {
     return el('th', { scope: 'col' },
       el('button', { type: 'button', onclick: function () { if (state.sort === key) state.dir = -state.dir; else { state.sort = key; state.dir = -1; } render(); } },
@@ -341,8 +374,8 @@
           el('span', { class: 'num', text: fmtUsd(r.implied_value_usd) }),
           el('span', { class: 'range', text: fmtUsd(r.implied_lo25_usd) + '–' + fmtUsd(r.implied_hi75_usd) })
         )),
-        el('td', null, el('span', { class: 'verdict ' + r.verdict, text: verdictLabel + ' $' + usdPerHour(r).toFixed(0) })),
-        el('td', { class: 'num', text: '$' + usdPerHour(r).toFixed(3) })
+        el('td', null, el('span', { class: 'verdict ' + scenarioVerdict(r), text: verdictLabel + ' $' + netPerHour(r).toFixed(0) })),
+        el('td', { class: 'num', text: '$' + netPerHour(r).toFixed(3) })
       );
       tbody.appendChild(tr);
     });
@@ -510,6 +543,7 @@
     shell.appendChild(lede());
     shell.appendChild(accountingPanel());
     shell.appendChild(checksumPanel());
+    shell.appendChild(planPanel());
     shell.appendChild(controls());
     shell.appendChild(state.tab === 'pre-token' ? boardTable() : liveTable());
     if (state.tab === 'pre-token') { shell.appendChild(peerPanel()); shell.appendChild(validationPanel()); }
