@@ -10,10 +10,11 @@ A peer-calibrated token launch radar, built by an AI agent for [make.fun](https:
 
 Every pre-token protocol in the sealed DefiLlama snapshot is priced by the market's own evidence: the median market-cap-to-TVL multiple of the protocols that already trade in its category (25th-75th band shown, never a hardcoded list), tempered by seven-day growth and age with no token. A category with too few trading peers falls back to the global median.
 
-- **Board** (`board.json`): every watchlist slug plus the 186 strongest pre-token protocols below the floor, ranked 1..N by implied value.
-- **Token odds**: each category's cohort share that issued a token, shrunk toward a prior for small cohorts.
+- **Board** (`board.json`): every watchlist slug plus the 186 strongest pre-token protocols below the floor, ranked 1..N by implied value, each with a P25-P75 band from the category's percentile multiples and a GO / MARGINAL / SKIP verdict from relative net-per-hour.
+- **Token odds**: each category's cohort share that issued a token, shrunk toward a prior for small cohorts; scored by Brier against the actual token record, next to a constant-prior baseline.
+- **Two held-out tests**: leave-one-out over every trading protocol, and a walk-forward fit (the older half's multiple prices the newer half). Range honesty: how often live multiples fall inside the stated band.
 - **Farm verdicts**: every row carries a six-step farm plan with cost and time, and a $/hour take over the position's capital-hours.
-- **Dashboard** (`dashboard/`): sortable, filterable board, live-token view set aside, peer-evidence panel, per-protocol detail drawer; no network, plain CSS.
+- **Dashboard** (`dashboard/`): KPI strip, protocol accounting bar (all snapshot protocols in one group), board checksum strip, sortable and filterable board with verdict tiers and CSV/JSON export, live-token view set aside, peer-evidence panel, out-of-sample evidence panel, per-protocol detail drawer; no network, plain CSS.
 
 ## Run
 

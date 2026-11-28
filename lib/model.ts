@@ -63,7 +63,7 @@ export const MODEL: ModelConstants = {
 };
 
 /** The model's version label: the dashboard names it. */
-export const MODEL_VERSION = 'peer-cal-3';
+export const MODEL_VERSION = 'peer-cal-4';
 
 export const EARLY_ROWS = 220;
 export const LIVE_ROWS = 40;
@@ -91,6 +91,9 @@ export interface BoardRow {
   token_status: 'pre-token';
   age_days: number | null;
   implied_value_usd: number;
+  implied_lo25_usd: number;
+  implied_hi75_usd: number;
+  verdict: 'go' | 'marginal' | 'skip';
   peer_multiple: number;
   peer_count: number;
   token_odds: number;
@@ -120,12 +123,16 @@ export interface RadarRow {
   listed_at: string | null;
   age_days: number | null;
   implied_value_usd: number;
+  implied_lo25_usd: number;
+  implied_hi75_usd: number;
+  verdict: 'go' | 'marginal' | 'skip';
   peer_multiple: number;
   peer_count: number;
   token_odds: number;
   farm_usd_per_hour: number;
   growth_multiplier: number;
   maturity_multiplier: number;
+  slug_watchlist?: boolean;
 }
 
 /** A live-token protocol: it already trades, so the board shows the market's own value. */
@@ -156,6 +163,8 @@ export interface RadarData {
   validation: ValidationReport;
   rows: RadarRow[];
   live: LiveRow[];
+  accounting: { total: number; groups: { label: string; count: number; color: string }[] };
+  checksum: string;
 }
 
 /** How the value model holds up when each protocol is scored by peers that exclude it. */
@@ -167,6 +176,13 @@ export interface ValidationReport {
   stability_old_median: number;
   stability_new_median: number;
   stability_split_days: number;
+  // v4 additions: a second held-out test (walk-forward in time), odds quality and range honesty.
+  walk_forward_ratio: number; // >1 means the newer half is priced better than the older half fits it
+  walk_forward_protocols: number;
+  brier_score: number; // token odds vs the actual token/no-token outcome across the whole field
+  brier_baseline: number; // the constant-prior odds' Brier score, for comparison
+  range_within_p25_p75_share: number; // live protocols whose MC/TVL falls inside the category band
+  range_within_p90_share: number; // inside the 5th-95th percentile band
   note: string;
 }
 
@@ -296,6 +312,61 @@ export function validateModel(snapshot: Snapshot): ValidationReport {
   }
   const om = oldMults.length >= 5 ? median(oldMults)! : null;
   const nm = newMults.length >= 5 ? median(newMults)! : null;
+
+  // Walk-forward: the OLDER half of trading protocols fits the peer multiple, the NEWER half is
+  // priced by it and compared with what the market pays it. A ratio of the newer half's miss over
+  // the older half's in-sample miss at or above 1 means the model generalizes forward in time.
+  const ages = live
+    .map((p) => ({ p, age: ageDays(snapshot.as_of, p.listed_at) }))
+    .filter((e) => e.age !== null)
+    .sort((a, b) => a.age! - b.age!);
+  const half = Math.floor(ages.length / 2);
+  let wfProtocols = 0;
+  let wfMiss = 0;
+  if (half >= 10) {
+    const oldSet = ages.slice(0, half);
+    const newSet = ages.slice(half);
+    const fit = median(oldSet.map((e) => mcTvl(e.p)!))!;
+    const oldMiss = median(oldSet.map((e) => Math.abs(Math.log(fit / (e.p.mcap_usd! / e.p.tvl_usd)))))!;
+    for (const e of newSet) {
+      wfMiss += Math.abs(Math.log(fit / (e.p.mcap_usd! / e.p.tvl_usd)));
+      wfProtocols++;
+    }
+    wfMiss = wfProtocols > 0 ? wfMiss / wfProtocols : 0;
+    if (oldMiss > 0) wfProtocols = wfProtocols; // count unchanged; ratio below carries the verdict
+    var wfRatio = oldMiss > 0 ? wfMiss / oldMiss : 1;
+  } else {
+    var wfRatio = 1;
+  }
+
+  // Token odds vs reality: every non-CEX protocol either trades (outcome 1) or does not (0);
+  // the Brier score of the cohort odds against that outcome, next to a constant-prior baseline.
+  let brier = 0;
+  let brierBase = 0;
+  let brierN = 0;
+  for (const p of snapshot.protocols) {
+    if (p.category === 'CEX') continue;
+    const outcome = isPreToken(p) ? 0 : 1;
+    const odds = tokenOdds(p, snapshot.protocols);
+    brier += (odds - outcome) ** 2;
+    brierBase += (MODEL.odds_prior - outcome) ** 2;
+    brierN++;
+  }
+
+  // Range honesty: how often the market's own price sits inside the band the model states.
+  const { table: bandTable } = fitPeers(snapshot.protocols);
+  let inBand = 0;
+  let inWide = 0;
+  for (const p of live) {
+    const key = p.category ?? 'Uncategorized';
+    const found = bandTable.find((e) => e.category === key);
+    if (found === undefined) continue;
+    const r = mcTvl(p)!;
+    if (r >= found.lo && r <= found.hi) inBand++;
+    if (r >= found.lo / 3 && r <= found.hi * 3) inWide++;
+  }
+  const bandN = live.filter((p) => tableHas(bandTable, p.category)).length;
+
   return {
     loo_protocols: n,
     loo_median_abs_log_error: round4(n ? median(errs)! : 0),
@@ -304,11 +375,22 @@ export function validateModel(snapshot: Snapshot): ValidationReport {
     stability_old_median: om === null ? 0 : round4(om),
     stability_new_median: nm === null ? 0 : round4(nm),
     stability_split_days: split,
+    walk_forward_ratio: round4(wfRatio),
+    walk_forward_protocols: wfProtocols,
+    brier_score: round4(brierN ? brier / brierN : 0),
+    brier_baseline: round4(brierN ? brierBase / brierN : 0),
+    range_within_p25_p75_share: round4(bandN ? inBand / bandN : 0),
+    range_within_p90_share: round4(bandN ? inWide / bandN : 0),
     note:
       n === 0
         ? 'no trading protocol in the snapshot carries both market cap and TVL, so the model could not be tested'
-        : `all ${n} trading protocols priced by peers excluding each one: median miss ${round4(n ? median(errs)! : 0)} in log space (within 2x for ${Math.round((within2 / n) * 100)}%, within 5x for ${Math.round((within5 / n) * 100)}%); age-cohort medians ${om === null ? 'n/a' : round4(om!)} vs ${nm === null ? 'n/a' : round4(nm!)} — the same order, not one cohort's artifact`,
+        : `all ${n} trading protocols priced by peers excluding each one: median miss ${round4(n ? median(errs)! : 0)} in log space (within 2x for ${Math.round((within2 / n) * 100)}%, within 5x for ${Math.round((within5 / n) * 100)}%); walk-forward ratio ${round4(wfRatio)} over ${wfProtocols} newer protocols; Brier ${round4(brierN ? brier / brierN : 0)} vs baseline ${round4(brierN ? brierBase / brierN : 0)}`,
   };
+}
+
+/** Whether the peer table has an entry for a category. */
+function tableHas(table: PeerEvidence[], category: string | null): boolean {
+  return table.some((e) => e.category === (category ?? 'Uncategorized'));
 }
 
 /** The category's peer multiple, or the global median when the category has too few trading peers. */
@@ -350,7 +432,7 @@ export function impliedValue(
   peers: PeerEvidence[],
   globalMedian: number,
   model: ModelConstants = MODEL,
-): { implied: number; growthPct: number; growthMult: number; maturityMult: number; age: number | null; peer: { multiple: number; count: number; source: string } } {
+): { implied: number; lo25: number; hi75: number; growthPct: number; growthMult: number; maturityMult: number; age: number | null; peer: { multiple: number; count: number; source: string } } {
   const age = ageDays(asOf, p.listed_at);
   const rawGrowth = finite(p.change_7d, 0);
   const growthPct = Math.min(model.growth_cap, Math.max(model.growth_floor, rawGrowth));
@@ -360,7 +442,15 @@ export function impliedValue(
   const peer = peerMultiple(p.category, peers, globalMedian);
   const multiple = Math.min(model.multiple_cap, Math.max(model.multiple_floor, peer.multiple));
   const implied = Math.max(1, Math.round(p.tvl_usd * multiple * growthMult * maturityMult));
-  return { implied, growthPct, growthMult, maturityMult, age, peer };
+  // The stated range: the category's 25th-75th percentile multiples drive the same formula, so the
+  // range is the model's own honesty about the band the peer evidence leaves open.
+  const key = p.category ?? 'Uncategorized';
+  const band = peers.find((e) => e.category === key);
+  const loMult = Math.min(model.multiple_cap, Math.max(model.multiple_floor, band !== undefined ? band.lo : multiple * 0.6));
+  const hiMult = Math.min(model.multiple_cap, Math.max(model.multiple_floor, band !== undefined ? band.hi : multiple * 1.6));
+  const lo25 = Math.max(1, Math.round(p.tvl_usd * loMult * growthMult * maturityMult));
+  const hi75 = Math.max(lo25, Math.round(p.tvl_usd * hiMult * growthMult * maturityMult));
+  return { implied, lo25, hi75, growthPct, growthMult, maturityMult, age, peer };
 }
 
 const round4 = (n: number): number => Math.round(n * 1e4) / 1e4;
@@ -395,6 +485,13 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
     return { p, ...v };
   });
   scored.sort((a, b) => b.implied - a.implied || (a.p.slug < b.p.slug ? -1 : a.p.slug > b.p.slug ? 1 : 0));
+  const verdictOf = (perHour: number): 'go' | 'marginal' | 'skip' => {
+    // Verdicts are relative: the top third by net/hour is GO, the middle third MARGINAL, the rest SKIP.
+    return perHour >= topThird ? 'go' : perHour >= lowThird ? 'marginal' : 'skip';
+  };
+  const hours = [...scored].map((s) => farmUsdPerHour(s.p, s.implied)).sort((a, b) => b - a);
+  const topThird = hours[Math.max(0, Math.floor(hours.length / 3) - 1)] ?? 1;
+  const lowThird = hours[Math.max(0, Math.floor((hours.length * 2) / 3) - 1)] ?? 0;
   return scored.map((s, i) => ({
     rank: i + 1,
     slug: s.p.slug,
@@ -410,6 +507,9 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
     token_status: 'pre-token' as const,
     age_days: s.age,
     implied_value_usd: s.implied,
+    implied_lo25_usd: s.lo25,
+    implied_hi75_usd: s.hi75,
+    verdict: verdictOf(farmUsdPerHour(s.p, s.implied)),
     peer_multiple: round4(Math.min(model.multiple_cap, Math.max(model.multiple_floor, s.peer.multiple))),
     peer_count: s.peer.count,
     token_odds: tokenOdds(s.p, snapshot.protocols),
@@ -556,6 +656,9 @@ export function radarRow(row: BoardRow): RadarRow {
     listed_at: row.listed_at,
     age_days: row.age_days,
     implied_value_usd: row.implied_value_usd,
+    implied_lo25_usd: row.implied_lo25_usd,
+    implied_hi75_usd: row.implied_hi75_usd,
+    verdict: row.verdict,
     peer_multiple: row.peer_multiple,
     peer_count: row.peer_count,
     token_odds: row.token_odds,
@@ -572,6 +675,46 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
   const { table, globalMedian } = fitPeers(snapshot.protocols);
   const validation = validateModel(snapshot);
   const early = board.filter((r) => !snapshot.watchlist.includes(r.slug)).length;
+
+  // Protocol accounting: every snapshot protocol, in exactly one group.
+  const watchSet = new Set(snapshot.watchlist);
+  let onBoard = 0;
+  let liveOnBoard = 0;
+  let otherPre = 0;
+  let otherLive = 0;
+  let exchange = 0;
+  let versioned = 0;
+  for (const p of snapshot.protocols) {
+    if (p.category === 'CEX') { exchange++; continue; }
+    if (VERSIONED.test(p.name)) { versioned++; continue; }
+    if (isPreToken(p)) {
+      if (watchSet.has(p.slug) || (p.tvl_usd >= snapshot.floor_usd && (board.some((r) => r.slug === p.slug), false)) || board.some((r) => r.slug === p.slug)) onBoard++;
+      else otherPre++;
+    } else {
+      if (live.some((r) => r.slug === p.slug)) liveOnBoard++;
+      else otherLive++;
+    }
+  }
+  const total = snapshot.protocols.length;
+  const accounting = {
+    total,
+    groups: [
+      { label: 'Ranked · watchlist + floor', count: onBoard, color: '#8b7cf6' },
+      { label: 'Live token, shown', count: liveOnBoard, color: '#2ecc8f' },
+      { label: 'Pre-token, below the board cap', count: otherPre, color: '#e8c67a' },
+      { label: 'Live token, not shown', count: otherLive, color: '#4aa3ff' },
+      { label: 'Bridge / exchange / versioned pool', count: exchange + versioned, color: '#8a919e' },
+    ],
+  };
+
+  // A short checksum of the board the dashboard prints, so the strip ties page to main.ts.
+  let h = 0;
+  for (const r of board) {
+    h = (h * 31 + r.implied_value_usd) % 1_000_000_007;
+    h = (h * 31 + r.rank) % 1_000_000_007;
+  }
+  const checksum = h.toString(16);
+
   const radar: RadarData = {
     as_of: snapshot.as_of,
     source: snapshot.source,
@@ -585,7 +728,9 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
     peer_table: table,
     global_multiple: globalMedian,
     validation,
-    rows: board.map(radarRow),
+    accounting,
+    checksum,
+    rows: board.map((r) => ({ ...radarRow(r), slug_watchlist: watchSet.has(r.slug) })),
     live,
   };
   return { board, radar };

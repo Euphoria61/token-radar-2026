@@ -1,5 +1,14 @@
 // Launch Radar — entrypoint for the peer-calibrated board (Node 22, standard library only).
 //
+// v4 changelog (peer-cal-4, this rewrite):
+//   - per-row P25-P75 implied-value bands from the category's percentile multiples
+//   - verdict per row (GO / MARGINAL / SKIP) from relative net-per-hour thirds
+//   - walk-forward held-out test: the older half's multiple prices the newer half
+//   - Brier score of the token odds against the actual token record, with a constant-prior baseline
+//   - range-honesty shares: how often live multiples fall inside the stated P25-P75 band
+//   - protocol accounting bar: all snapshot protocols in exactly one group
+//   - board checksum printed on the page, recomputable from board.json + main.ts
+//
 // Pipeline, in order:
 //   1. read the sealed snapshot (--input <file|dir>, /input by default)
 //   2. fit the peer evidence: per-category market-cap/TVL multiples of the protocols that trade
@@ -90,9 +99,13 @@ writeFileSync(
 );
 
 const peers = radar.peer_table.length;
+const verdicts = { go: 0, marginal: 0, skip: 0 };
+for (const r of board) verdicts[r.verdict]++;
 process.stdout.write(
   `launch radar: ${snapshot.protocols.length} protocols, ${snapshot.watchlist.length} watchlisted, ` +
     `${board.length} rows scored (${radar.early_size} early, ${radar.live_size} live set aside, ` +
     `${peers} categories with peer evidence, global multiple ${radar.global_multiple})\n` +
+  `launch radar: verdicts ${verdicts.go} GO / ${verdicts.marginal} MARGINAL / ${verdicts.skip} SKIP; ` +
+    `walk-forward ${radar.validation.walk_forward_ratio}, Brier ${radar.validation.brier_score} vs ${radar.validation.brier_baseline}; checksum ${radar.checksum}\n` +
   `launch radar: wrote board.json, data.js, dashboard/ (${3} files), screenshots/ (${shots.length}) and dossier.json in ${out}\n`,
 );
