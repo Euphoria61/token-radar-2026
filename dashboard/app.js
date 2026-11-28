@@ -446,7 +446,10 @@
       el('div', { class: 'formula' },
         'implied = tvl_usd × clamp(peer_median_mc_tvl, ' + DATA.model.multiple_floor + ', ' + DATA.model.multiple_cap + ') × (1 + clamp(change_7d, ' + DATA.model.growth_floor + ', ' + DATA.model.growth_cap + ')/100 × ' + DATA.model.growth_weight + ') × (' + DATA.model.age_floor + ' + min(age_days, ' + DATA.model.age_days + ')/' + DATA.model.age_days + ' × ' + DATA.model.age_range + ')'
       ),
-      el('p', { class: 'sub', text: 'Token odds come from the category\'s own cohort: the share that issued a token, shrunk toward a ' + Math.round(DATA.model.odds_prior * 100) + '% prior for small cohorts. $/hour is the modelled airdrop\'s expected take over the farm\'s capital-hours at the plan\'s hold time. Every row is scored by the same function; no name is special-cased.' })
+      el('p', { class: 'sub', text: 'Token odds come from the category\'s own cohort: the share that issued a token, shrunk toward a ' + Math.round(DATA.model.odds_prior * 100) + '% prior for small cohorts. $/hour is the modelled airdrop\'s expected take over the farm\'s capital-hours at the plan\'s hold time. Every row is scored by the same function; no name is special-cased.' }),
+      el('div', { class: 'formula' },
+        'net/hour (scenario) = implied_value_usd × 0.005 × token_odds × 4 ÷ (horizon_days × 24) ÷ plan_size_usd × 1000 — re-costed live by the plan-size slider; the board\'s own verdict uses the default $250 / 45 days.'
+      )
     );
   }
 
@@ -479,11 +482,34 @@
         el('div', null, el('span', { text: 'Growth multiplier' }), el('b', { class: 'num', text: String(row.growth_multiplier) })),
         el('div', null, el('span', { text: 'Maturity multiplier' }), el('b', { class: 'num', text: String(row.maturity_multiplier) })),
         el('div', null, el('span', { text: 'Token odds (category cohort)' }), el('b', { class: 'num', text: fmtOdds(row.token_odds) })),
-        el('div', null, el('span', { text: 'Farm verdict' }), el('b', { class: 'num', text: '$' + usdPerHour(row).toFixed(3) + '/hour' })),
+        el('div', null, el('span', { text: 'Implied value (P25–P75)' }), el('b', { class: 'num', text: fmtUsd(row.implied_lo25_usd) + ' – ' + fmtUsd(row.implied_hi75_usd) })),
+        el('div', null, el('span', { text: 'Farm verdict (default plan)' }), el('b', { class: 'num', text: '$' + usdPerHour(row).toFixed(3) + '/hour' })),
+        el('div', null, el('span', { text: 'Farm verdict (this scenario: $' + state.planSize + ', ' + state.horizonDays + 'd)' }), el('b', { class: 'num', text: '$' + netPerHour(row).toFixed(3) + '/hour · ' + scenarioVerdict(row).toUpperCase() })),
         el('div', null, el('span', { text: 'Implied value' }), el('b', { class: 'num', text: fmtUsd(row.implied_value_usd) }))
       ),
       el('p', { class: 'sub', text: 'Model ' + DATA.model_version + ': the same function scores every protocol. The page recomputes this row as ' + fmtUsd(recomputed) + (recomputed === row.implied_value_usd ? ', the same number board.json carries.' : ', which differs from the board: the data would be stale.') + ' This is an estimate, not a price.' })
     ));
+    // Comparable peers: the live protocols of the same category, the evidence this row borrows.
+    var peers = DATA.live.filter(function (l) { return l.category === row.category && l.mc_tvl > 0; }).slice(0, 8);
+    if (peers.length > 0) {
+      var pbody = el('tbody');
+      peers.forEach(function (l) {
+        pbody.appendChild(el('tr', null,
+          el('td', null, el('b', { text: l.name })),
+          el('td', { class: 'num', text: fmtUsd(l.tvl_usd) }),
+          el('td', { class: 'num', text: fmtUsd(l.mcap_usd) }),
+          el('td', { class: 'num', text: fmtMult(l.mc_tvl) })
+        ));
+      });
+      dialog.appendChild(el('section', { class: 'detail-section' },
+        el('h3', { text: 'The peers this row is priced from' }),
+        el('p', { class: 'sub', text: 'Live ' + (row.category || 'Uncategorized') + ' protocols and the market-cap-to-TVL multiple the market pays each. Their median is this row\'s peer multiple; none of them is priced by itself.' }),
+        el('div', { class: 'table-wrap' }, el('table', null,
+          el('thead', null, el('tr', null, el('th', { text: 'Trading peer' }), el('th', { text: 'TVL' }), el('th', { text: 'Market cap' }), el('th', { text: 'MC/TVL' }))),
+          pbody
+        ))
+      ));
+    }
     dialog.appendChild(el('section', { class: 'detail-section' },
       el('h3', { text: 'Farm plan' }),
       el('ol', { class: 'steps' }, steps.map(function (s) {
