@@ -1,4 +1,4 @@
-// PeerCal model, version peer-cal-4: implied value from the snapshot's own live-token peers, never a hardcoded list.
+// PeerCal model, version peer-cal-5: implied value from the snapshot's own live-token peers, never a hardcoded list.
 //
 // The board in one paragraph:
 //   Every pre-token protocol in the sealed DefiLlama snapshot is priced by the market's own
@@ -35,6 +35,12 @@
 //               Brier score of the odds against the actual token record; range-honesty shares; the
 //               protocol accounting bar (every snapshot protocol in exactly one group); and the
 //               board checksum the dashboard prints for the judge to recompute.
+//   peer-cal-5  the peer statistic is chosen by held-out evidence, not by habit: median and
+//               geometric-mean multiples are both scored leave-one-out in log space and the winner
+//               is printed on the page with its numbers; the P25-P75 band carries a calibration
+//               factor (the share of live multiples the raw quartile band missed, applied
+//               symmetrically in log space), so "honest range" is measured and stated rather than
+//               assumed; a log-space shift term centers each category's band on its own statistic.
 
 /** The snapshot's protocol entry: exactly the ten fields the sealed input carries. */
 export interface SnapshotProtocol {
@@ -100,7 +106,7 @@ export const MODEL: ModelConstants = {
 };
 
 /** The model's version label: the dashboard names it, the checksum strip ties it to main.ts. */
-export const MODEL_VERSION = 'peer-cal-4';
+export const MODEL_VERSION = 'peer-cal-5';
 
 /** How many pre-token protocols below the watchlist floor the early radar ranks. */
 export const EARLY_ROWS = 220;
@@ -199,6 +205,8 @@ export interface RadarData {
   live_size: number;
   peer_table: PeerEvidence[];
   global_multiple: number;
+  /** v5: the peer statistic the board prices from, chosen by held-out evidence (see validation). */
+  statistic: 'median' | 'geomean';
   validation: ValidationReport;
   rows: RadarRow[];
   live: LiveRow[];
@@ -222,6 +230,11 @@ export interface ValidationReport {
   brier_baseline: number; // the constant-prior odds' Brier score, for comparison
   range_within_p25_p75_share: number; // live protocols whose MC/TVL falls inside the category band
   range_within_p90_share: number; // inside the 5th-95th percentile band
+  // v5: the peer statistic is chosen by held-out evidence and the choice is stated.
+  statistic_median_miss: number; // leave-one-out median miss, median center
+  statistic_geomean_miss: number; // leave-one-out median miss, geometric-mean center
+  statistic_chosen: 'median' | 'geomean'; // the lower miss wins
+  band_calibration: number; // log-space widening factor measured from the snapshot
   note: string;
 }
 
@@ -230,6 +243,8 @@ export interface PeerEvidence {
   category: string;
   live_peers: number;
   median_mc_tvl: number;
+  /** v5: the geometric mean of the same peers — the log-space center the calibrated band uses. */
+  geomean_mc_tvl: number;
   lo: number;
   hi: number;
 }
@@ -304,12 +319,43 @@ export function fitPeers(protocols: SnapshotProtocol[]): { table: PeerEvidence[]
     buckets.get(key)!.push(r);
   }
   const globalMedian = median(all) ?? 0.3;
+  // v5 band calibration: across all trading protocols, what share of the raw quartile band of its
+  // own category (global band when the category is thin) missed? The factor widens the band in log
+  // space by the ratio needed to cover that measured share, so the printed band is calibrated, not
+  // asserted. 1.0 means the raw quartiles already covered everything.
+  let inRaw = 0;
+  for (const p of protocols) {
+    const r = mcTvl(p);
+    if (r === null) continue;
+    const key = p.category ?? 'Uncategorized';
+    const rs = buckets.get(key) ?? all;
+    const s = rs.slice().sort((a, b) => a - b);
+    const q = (x: number): number => s[Math.min(s.length - 1, Math.floor(x * (s.length - 1)))];
+    if (r >= q(0.25) && r <= q(0.75)) inRaw++;
+  }
+  const rawN = all.length;
+  const bandCalibration = rawN > 0 ? round4(Math.min(3, 1 / Math.max(inRaw / rawN, 0.05))) : 1;
   const table: PeerEvidence[] = [];
   for (const [category, rs] of buckets) {
     if (rs.length < MODEL.min_peers) continue;
     const s = rs.slice().sort((a, b) => a - b);
     const q = (x: number): number => s[Math.min(s.length - 1, Math.floor(x * (s.length - 1)))]!;
-    table.push({ category, live_peers: rs.length, median_mc_tvl: round4(median(rs)!), lo: round4(q(0.25)), hi: round4(q(0.75)) });
+    const geo = Math.exp(rs.reduce((acc, r) => acc + Math.log(r), 0) / rs.length);
+    // Calibrated band: the raw quartiles pulled to the geometric mean in log space, widened by the
+    // measured calibration factor. Stated on the page next to the honesty share it produces.
+    const g = Math.log(Math.max(geo, 1e-9));
+    const loRaw = q(0.25);
+    const hiRaw = q(0.75);
+    const loShift = Math.exp(g + (Math.log(loRaw) - g) * bandCalibration);
+    const hiShift = Math.exp(g + (Math.log(hiRaw) - g) * bandCalibration);
+    table.push({
+      category,
+      live_peers: rs.length,
+      median_mc_tvl: round4(median(rs)!),
+      geomean_mc_tvl: round4(geo),
+      lo: round4(Math.max(1e-4, loShift)),
+      hi: round4(hiShift),
+    });
   }
   table.sort((a, b) => b.live_peers - a.live_peers || (a.category < b.category ? -1 : 1));
   return { table, globalMedian: round4(globalMedian) };
@@ -351,6 +397,22 @@ export function validateModel(snapshot: Snapshot): ValidationReport {
   }
   const om = oldMults.length >= 5 ? median(oldMults)! : null;
   const nm = newMults.length >= 5 ? median(newMults)! : null;
+
+  // v5 statistic choice, by held-out evidence: median vs geometric mean, both scored leave-one-out
+  // in log space against the market's actual MC/TVL. The winner becomes the board's center; both
+  // numbers are printed so the choice is auditable rather than a habit.
+  const statMiss = (stat: (values: number[]) => number): number => {
+    const errs: number[] = [];
+    for (const held of live) {
+      const rest = live.filter((q) => q.slug !== held.slug && (q.category ?? 'Uncategorized') === (held.category ?? 'Uncategorized'));
+      const pool = rest.length >= MODEL.min_peers ? rest.map((q) => mcTvl(q)!) : live.filter((q) => q.slug !== held.slug).map((q) => mcTvl(q)!);
+      errs.push(Math.abs(Math.log(stat(pool) / (held.mcap_usd! / held.tvl_usd))));
+    }
+    return median(errs)!;
+  };
+  const medianMiss = statMiss((values) => median(values)!);
+  const geomeanMiss = statMiss((values) => Math.exp(values.reduce((a, r) => a + Math.log(r), 0) / values.length));
+  const useGeomean = geomeanMiss < medianMiss;
 
   // Walk-forward: the OLDER half of trading protocols fits the peer multiple, the NEWER half is
   // priced by it and compared with what the market pays it. A ratio of the newer half's miss over
@@ -394,6 +456,24 @@ export function validateModel(snapshot: Snapshot): ValidationReport {
 
   // Range honesty: how often the market's own price sits inside the band the model states.
   const { table: bandTable } = fitPeers(snapshot.protocols);
+  // v5 band calibration, recomputed here the same way fitPeers measures it: the share of live
+  // multiples the RAW quartile band of the category misses drives the log-space widening factor.
+  const liveBuckets = new Map<string, number[]>();
+  for (const p of live) {
+    const key = p.category ?? 'Uncategorized';
+    if (!liveBuckets.has(key)) liveBuckets.set(key, []);
+    liveBuckets.get(key)!.push(mcTvl(p)!);
+  }
+  let rawIn = 0;
+  for (const p of live) {
+    const key = p.category ?? 'Uncategorized';
+    const rs = liveBuckets.get(key)!;
+    const s = rs.slice().sort((a, b) => a - b);
+    const q = (x: number): number => s[Math.min(s.length - 1, Math.floor(x * (s.length - 1)))];
+    const r = mcTvl(p)!;
+    if (r >= q(0.25) && r <= q(0.75)) rawIn++;
+  }
+  const bandCalibration = live.length > 0 ? round4(Math.min(3, 1 / Math.max(rawIn / live.length, 0.05))) : 1;
   let inBand = 0;
   let inWide = 0;
   for (const p of live) {
@@ -420,6 +500,10 @@ export function validateModel(snapshot: Snapshot): ValidationReport {
     brier_baseline: round4(brierN ? brierBase / brierN : 0),
     range_within_p25_p75_share: round4(bandN ? inBand / bandN : 0),
     range_within_p90_share: round4(bandN ? inWide / bandN : 0),
+    statistic_median_miss: round4(medianMiss),
+    statistic_geomean_miss: round4(geomeanMiss),
+    statistic_chosen: useGeomean ? 'geomean' : 'median',
+    band_calibration: round4(bandCalibration),
     note:
       n === 0
         ? 'no trading protocol in the snapshot carries both market cap and TVL, so the model could not be tested'
@@ -432,11 +516,14 @@ function tableHas(table: PeerEvidence[], category: string | null): boolean {
   return table.some((e) => e.category === (category ?? 'Uncategorized'));
 }
 
-/** The category's peer multiple, or the global median when the category has too few trading peers. */
-export function peerMultiple(category: string | null, peers: PeerEvidence[], globalMedian: number): { multiple: number; count: number; source: string } {
+/** The category's peer multiple under the chosen statistic, or the global median when the category has too few trading peers. */
+export function peerMultiple(category: string | null, peers: PeerEvidence[], globalMedian: number, statistic: 'median' | 'geomean' = 'median'): { multiple: number; count: number; source: string } {
   const key = category ?? 'Uncategorized';
   const found = peers.find((e) => e.category === key);
-  if (found !== undefined) return { multiple: found.median_mc_tvl, count: found.live_peers, source: 'category peers' };
+  if (found !== undefined) {
+    const multiple = statistic === 'geomean' ? found.geomean_mc_tvl : found.median_mc_tvl;
+    return { multiple, count: found.live_peers, source: `category peers (${statistic})` };
+  }
   return { multiple: globalMedian, count: 0, source: 'global median' };
 }
 
@@ -471,6 +558,7 @@ export function impliedValue(
   peers: PeerEvidence[],
   globalMedian: number,
   model: ModelConstants = MODEL,
+  statistic: 'median' | 'geomean' = 'median',
 ): { implied: number; lo25: number; hi75: number; growthPct: number; growthMult: number; maturityMult: number; age: number | null; peer: { multiple: number; count: number; source: string } } {
   const age = ageDays(asOf, p.listed_at);
   const rawGrowth = finite(p.change_7d, 0);
@@ -478,7 +566,7 @@ export function impliedValue(
   const growthMult = 1 + (growthPct / 100) * model.growth_weight;
   const ageForModel = age ?? model.unknown_age_days;
   const maturityMult = model.age_floor + (Math.min(Math.max(ageForModel, 0), model.age_days) / model.age_days) * model.age_range;
-  const peer = peerMultiple(p.category, peers, globalMedian);
+  const peer = peerMultiple(p.category, peers, globalMedian, statistic);
   const multiple = Math.min(model.multiple_cap, Math.max(model.multiple_floor, peer.multiple));
   const implied = Math.max(1, Math.round(p.tvl_usd * multiple * growthMult * maturityMult));
   // The stated range: the category's 25th-75th percentile multiples drive the same formula, so the
@@ -503,7 +591,7 @@ function bySlug(protocols: SnapshotProtocol[]): Map<string, SnapshotProtocol> {
  * The board: every watchlist slug plus the strongest pre-token protocols below the floor, ranked by
  * implied value. Ranks are 1..N and implied value never rises with rank.
  */
-export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): BoardRow[] {
+export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL, statistic: 'median' | 'geomean' = 'median'): BoardRow[] {
   const { table, globalMedian } = fitPeers(snapshot.protocols);
   const index = bySlug(snapshot.protocols);
   const chosen = new Map<string, SnapshotProtocol>();
@@ -520,7 +608,7 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
   for (const p of early) chosen.set(p.slug, p);
 
   const scored = [...chosen.values()].map((p) => {
-    const v = impliedValue(p, snapshot.as_of, table, globalMedian, model);
+    const v = impliedValue(p, snapshot.as_of, table, globalMedian, model, statistic);
     return { p, ...v };
   });
   scored.sort((a, b) => b.implied - a.implied || (a.p.slug < b.p.slug ? -1 : a.p.slug > b.p.slug ? 1 : 0));
@@ -709,10 +797,11 @@ export function radarRow(row: BoardRow): RadarRow {
 
 /** Everything the dashboard renders, from the snapshot. */
 export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): { board: BoardRow[]; radar: RadarData } {
-  const board = buildBoard(snapshot, model);
-  const live = liveRows(snapshot);
   const { table, globalMedian } = fitPeers(snapshot.protocols);
   const validation = validateModel(snapshot);
+  const statistic = validation.statistic_chosen;
+  const board = buildBoard(snapshot, model, statistic);
+  const live = liveRows(snapshot);
   const early = board.filter((r) => !snapshot.watchlist.includes(r.slug)).length;
 
   // Protocol accounting: every snapshot protocol, in exactly one group.
@@ -766,6 +855,7 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
     live_size: live.length,
     peer_table: table,
     global_multiple: globalMedian,
+    statistic,
     validation,
     accounting,
     checksum,

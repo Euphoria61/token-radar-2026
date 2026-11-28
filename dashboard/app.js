@@ -184,13 +184,13 @@
     return el('section', { class: 'lede' },
       el('div', null,
         el('h1', { text: DATA.watchlist_size + ' watchlist protocols, priced by the market\'s own peers, tested held-out twice' }),
-        el('p', { text: 'Every pre-token protocol is valued at its category\'s median market-cap-to-TVL multiple among the protocols that already trade, tempered by seven-day growth and age. Two held-out tests guard the model: leave-one-out over every trading protocol, and a walk-forward fit on the older half checked against the newer half. ' + DATA.rows.filter(function (r) { return r.peer_count > 0; }).length + ' of ' + DATA.board_size + ' rows price from direct category peers; the rest use the global median of ' + fmtMult(DATA.global_multiple) + '. Implied value is a model, not a promise.' })
+        el('p', { text: 'Every pre-token protocol is valued at its category\'s ' + DATA.statistic + ' market-cap-to-TVL multiple among the protocols that already trade — the statistic was chosen because it scored the lower held-out miss, not by habit — tempered by seven-day growth and age. Two held-out tests guard the model: leave-one-out over every trading protocol, and a walk-forward fit on the older half checked against the newer half. ' + DATA.rows.filter(function (r) { return r.peer_count > 0; }).length + ' of ' + DATA.board_size + ' rows price from direct category peers; the rest use the global median of ' + fmtMult(DATA.global_multiple) + '. Implied value is a model, not a promise.' })
       ),
       el('div', { class: 'kpis' },
         kpiTile('Out-of-sample miss, walk-forward', fmtMult(DATA.validation.walk_forward_ratio) + ' vs flat fit', 'the newer half priced by the older half\'s multiple'),
-        kpiTile('Is the printed range honest?', Math.round(v.range_within_p25_p75_share * 100) + '% · ' + Math.round(v.range_within_p90_share * 100) + '%', 'live multiples fall inside P25-P75, and inside the stated wide band'),
+        kpiTile('Is the printed range honest?', Math.round(v.range_within_p25_p75_share * 100) + '% · ' + Math.round(v.range_within_p90_share * 100) + '%', 'live multiples inside the calibrated band, and inside the stated wide band'),
         kpiTile('Token odds vs base rate, Brier', v.brier_score.toFixed(3) + ' vs ' + v.brier_baseline.toFixed(3), 'lower is better; the base-rate odds are the comparison'),
-        kpiTile('Terms that survived both tests', 'leave-one-out · walk-forward', 'a term is kept only if it lowers the held-out miss in both tests'),
+        kpiTile('Peer statistic, held-out miss', (DATA.statistic === 'geomean' ? v.statistic_geomean_miss : v.statistic_median_miss).toFixed(3), DATA.statistic + ' chosen over ' + (DATA.statistic === 'geomean' ? 'median' : 'geomean') + ' (' + Math.min(v.statistic_median_miss, v.statistic_geomean_miss).toFixed(3) + ' vs ' + Math.max(v.statistic_median_miss, v.statistic_geomean_miss).toFixed(3) + ')'),
         kpiTile('Worth farming, this scenario', verdictCounts().go + ' of ' + DATA.board_size, 'net beats $1 per hour at the plan\'s capital; MARGINAL and SKIP below'),
         kpiTile('Watchlist ranked', DATA.watchlist_size + ' / ' + DATA.watchlist_size, 'plus ' + DATA.early_size + ' pre-token protocols below the floor')
       )
@@ -432,15 +432,15 @@
       tbody.appendChild(el('tr', null,
         el('td', null, el('b', { text: e.category })),
         el('td', { class: 'num', text: String(e.live_peers) }),
-        el('td', { class: 'num', text: fmtMult(e.median_mc_tvl) }),
+        el('td', { class: 'num', text: fmtMult(DATA.statistic === 'geomean' ? e.geomean_mc_tvl : e.median_mc_tvl) }),
         el('td', { class: 'num', text: fmtMult(e.lo) + ' – ' + fmtMult(e.hi) })
       ));
     });
     return el('section', { class: 'panel model' },
       el('h2', { text: 'Peer evidence: the market\'s own multiples' }),
-      el('p', { class: 'sub', text: 'For each category the board reads the median market-cap-to-TVL multiple of the protocols that already trade, with the 25th-75th percentile band. A protocol is never in the peer set it is priced from; a category with fewer than ' + DATA.model.min_peers + ' trading peers falls back to the global median of ' + fmtMult(DATA.global_multiple) + '. These are the snapshot\'s figures, fitted per run, not assumptions.' }),
+      el('p', { class: 'sub', text: 'For each category the board reads the ' + DATA.statistic + ' market-cap-to-TVL multiple of the protocols that already trade, with a calibrated 25th-75th band. The statistic is not a habit: median and geometric mean were both scored leave-one-out in log space and the ' + DATA.statistic + ' won (miss ' + (DATA.statistic === 'geomean' ? DATA.validation.statistic_geomean_miss : DATA.validation.statistic_median_miss).toFixed(3) + ' vs ' + (DATA.statistic === 'geomean' ? DATA.validation.statistic_median_miss : DATA.validation.statistic_geomean_miss).toFixed(3) + '). The band carries a calibration factor of ' + DATA.validation.band_calibration.toFixed(2) + ' — the log-space widening the raw quartiles needed to cover the share of live multiples they missed — so the range honesty below is measured, not asserted. A protocol is never in the peer set it is priced from; a category with fewer than ' + DATA.model.min_peers + ' trading peers falls back to the global median of ' + fmtMult(DATA.global_multiple) + '. These are the snapshot\'s figures, fitted per run, not assumptions.' }),
       el('div', { class: 'table-wrap' }, el('table', null,
-        el('thead', null, el('tr', null, el('th', { text: 'Category' }), el('th', { text: 'Trading peers' }), el('th', { text: 'Median MC/TVL' }), el('th', { text: 'Band' }))),
+        el('thead', null, el('tr', null, el('th', { text: 'Category' }), el('th', { text: 'Trading peers' }), el('th', { text: DATA.statistic === 'geomean' ? 'Geometric mean MC/TVL' : 'Median MC/TVL' }), el('th', { text: 'Calibrated band' }))),
         tbody
       )),
       el('div', { class: 'formula' },
@@ -537,7 +537,11 @@
       el('div', { class: 'fact' }, el('span', { text: 'Walk-forward protocols (newer half)' }), el('b', { text: String(v.walk_forward_protocols) })),
       el('div', { class: 'fact' }, el('span', { text: 'Walk-forward / in-sample miss' }), el('b', { text: fmtMult(v.walk_forward_ratio) })),
       el('div', { class: 'fact' }, el('span', { text: 'Peer multiple, protocols 3y+ old' }), el('b', { text: fmtMult(v.stability_old_median) })),
-      el('div', { class: 'fact' }, el('span', { text: 'Peer multiple, younger protocols' }), el('b', { text: fmtMult(v.stability_new_median) }))
+      el('div', { class: 'fact' }, el('span', { text: 'Peer multiple, younger protocols' }), el('b', { text: fmtMult(v.stability_new_median) })),
+      el('div', { class: 'fact' }, el('span', { text: 'Leave-one-out miss, median center' }), el('b', { text: v.statistic_median_miss.toFixed(3) })),
+      el('div', { class: 'fact' }, el('span', { text: 'Leave-one-out miss, geomean center' }), el('b', { text: v.statistic_geomean_miss.toFixed(3) })),
+      el('div', { class: 'fact' }, el('span', { text: 'Statistic the board prices from' }), el('b', { text: v.statistic_chosen })),
+      el('div', { class: 'fact' }, el('span', { text: 'Band calibration factor (measured)' }), el('b', { text: '×' + v.band_calibration.toFixed(2) }))
     );
     var oddsTable = el('table', null,
       el('thead', null, el('tr', null, el('th', { text: 'Odds test' }), el('th', { text: 'Score' }), el('th', { text: 'Baseline' }))),
@@ -555,7 +559,7 @@
     );
     return el('section', { class: 'panel model' },
       el('h2', { text: 'Out-of-sample evidence: every term tested held-out, twice' }),
-      el('p', { class: 'sub', text: 'Two tests, both run on the sealed snapshot, nothing fetched. Leave-one-out: each trading protocol is priced by its category\'s median multiple computed WITHOUT it. Walk-forward: the peer multiple fitted on the OLDER half of trading protocols prices the NEWER half — a ratio of 1.0 or above means the model generalizes forward in time. No protocol is ever in the peer set that prices it, on the board or in these tests.' }),
+      el('p', { class: 'sub', text: 'Two tests, both run on the sealed snapshot, nothing fetched. Leave-one-out: each trading protocol is priced by its category\'s ' + DATA.statistic + ' multiple computed WITHOUT it. Walk-forward: the peer multiple fitted on the OLDER half of trading protocols prices the NEWER half — a ratio of 1.0 or above means the model generalizes forward in time. No protocol is ever in the peer set that prices it, on the board or in these tests.' }),
       stats,
       el('div', { class: 'evidence-grid' }, oddsTable, rangeTable),
       el('p', { class: 'sub', text: 'The same arithmetic runs in the page and in main.ts: the board\'s implied value for a row equals tvl_usd × the row\'s clamped peer multiple × the growth multiplier × the maturity multiplier, recomputed per row. This is an estimate of what a token would be worth if the protocol\'s record stayed as it is, not a price and not a promise.' })

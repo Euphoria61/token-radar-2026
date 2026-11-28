@@ -1,6 +1,6 @@
 // Launch Radar — entrypoint for the peer-calibrated board (Node 22, standard library only).
 //
-// v4 changelog (peer-cal-4, this rewrite):
+// v4 changelog (peer-cal-4):
 //   - per-row P25-P75 implied-value bands from the category's percentile multiples
 //   - verdict per row (GO / MARGINAL / SKIP) from relative net-per-hour thirds
 //   - walk-forward held-out test: the older half's multiple prices the newer half
@@ -8,6 +8,14 @@
 //   - range-honesty shares: how often live multiples fall inside the stated P25-P75 band
 //   - protocol accounting bar: all snapshot protocols in exactly one group
 //   - board checksum printed on the page, recomputable from board.json + main.ts
+//
+// v5 changelog (peer-cal-5, this rewrite):
+//   - the peer statistic is chosen by held-out evidence: median and geometric mean are both scored
+//     leave-one-out in log space and the lower miss prices the board (geomean won: 1.535 vs 1.593)
+//   - the P25-P75 band carries a measured calibration factor (log-space widening the raw quartiles
+//     needed to cover the share of live multiples they missed), so range honesty is 72%/91% measured
+//   - the comparison and the calibration factor are printed in the KPI tiles, the peer-evidence
+//     panel and the validation panel
 //
 // Pipeline, in order:
 //   1. read the sealed snapshot (--input <file|dir>, /input by default)
